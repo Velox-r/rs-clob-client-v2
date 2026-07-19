@@ -314,9 +314,13 @@ pub struct PostOrderResponse {
     #[serde_as(deserialize_as = "DefaultOnNull")]
     #[serde(alias = "transactionsHashes")]
     pub transaction_hashes: Vec<B256>,
+    /// Trade ids for matched aggressive orders. The 2026-07-24 CLOB rollout
+    /// replaces `transactionsHashes` with `tradeIDs` in matched FAK/FOK
+    /// responses; the alias accepts both spellings alongside camelCase.
     #[builder(default)]
     #[serde(default)]
     #[serde_as(deserialize_as = "DefaultOnNull")]
+    #[serde(alias = "tradeIDs")]
     pub trade_ids: Vec<String>,
 }
 
