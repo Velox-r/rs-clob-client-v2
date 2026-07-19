@@ -174,6 +174,18 @@ where
             // Attempt connection
             match connect_async(&endpoint).await {
                 Ok((ws_stream, _)) => {
+                    // velox-latency: disable Nagle on the underlying socket.
+                    // Outbound subscribes/PINGs otherwise coalesce behind
+                    // delayed ACKs; inbound is unaffected. Best-effort.
+                    match ws_stream.get_ref() {
+                        MaybeTlsStream::Plain(s) => {
+                            let _ = s.set_nodelay(true);
+                        }
+                        MaybeTlsStream::Rustls(t) => {
+                            let _ = t.get_ref().0.set_nodelay(true);
+                        }
+                        _ => {}
+                    }
                     attempt = 0;
                     backoff.reset();
                     _ = state_tx.send(ConnectionState::Connected {

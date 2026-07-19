@@ -1471,7 +1471,15 @@ impl Client<Unauthenticated> {
         headers.insert("Connection", HeaderValue::from_static("keep-alive"));
         headers.insert("Content-Type", HeaderValue::from_static("application/json"));
 
-        let client = ReqwestClient::builder().default_headers(headers).build()?;
+        // velox-latency: never idle out the pooled TLS connection (reqwest
+        // default 90s — a sparser order cadence paid a cold TCP+TLS handshake
+        // on the first order after idle), and hold NAT/edge state with TCP
+        // keepalive probes.
+        let client = ReqwestClient::builder()
+            .default_headers(headers)
+            .pool_idle_timeout(None)
+            .tcp_keepalive(std::time::Duration::from_secs(60))
+            .build()?;
 
         let geoblock_host = Url::parse(
             config

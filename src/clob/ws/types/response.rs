@@ -1,6 +1,5 @@
 use bon::Builder;
 use serde::Deserialize;
-use serde_json::Value;
 use serde_with::{DefaultOnNull, DisplayFromStr, NoneAsEmptyString, serde_as};
 #[cfg(feature = "tracing")]
 use tracing::warn;
@@ -82,7 +81,10 @@ pub struct BookUpdate {
     /// Current ask levels (price ascending)
     #[serde(default)]
     pub asks: Vec<OrderBookLevel>,
-    /// Hash for orderbook validation
+    /// Hash for orderbook validation.
+    /// velox-latency: skipped at deserialization — never consumed, and the
+    /// allocation lands on every book snapshot.
+    #[serde(skip_deserializing, default)]
     pub hash: Option<String>,
 }
 
@@ -123,8 +125,9 @@ pub struct PriceChangeBatchEntry {
     pub size: Option<Decimal>,
     /// Side of the price change (BUY or SELL)
     pub side: Side,
-    /// Hash for validation (if present)
-    #[serde(default)]
+    /// Hash for validation (if present).
+    /// velox-latency: skipped at deserialization — never consumed.
+    #[serde(skip_deserializing, default)]
     pub hash: Option<String>,
     /// Best bid price after this change
     #[serde(default)]
@@ -486,46 +489,60 @@ pub struct MidpointUpdate {
 
 /// Deserialize messages from the byte slice, filtering by interest.
 ///
-/// For single objects, the JSON is parsed once into a `Value`, then the `event_type` is
-/// extracted to check interest before final deserialization via `from_value()`.
-/// This avoids re-parsing the JSON text twice.
+/// velox-latency: zero-DOM two-phase parse. Each element's `event_type` is
+/// skimmed with a borrowed probe struct (serde skips unmatched fields
+/// without building a tree), and only interested elements pay one direct
+/// deserialization — no `Value` DOM, no `from_value` re-traversal, and no
+/// per-element clone on array batches.
 ///
-/// For arrays, messages are processed one-by-one with tolerant parsing: unknown or invalid
-/// event types are skipped rather than causing the entire batch to fail.
+/// Semantics preserved from the `Value`-based implementation: primitives and
+/// tag-less objects yield an empty vec; a single interested object that
+/// fails full deserialization is an error; array batches stay tolerant —
+/// unknown or invalid events are skipped rather than failing the batch.
 pub fn parse_if_interested(
     bytes: &[u8],
     interest: &MessageInterest,
 ) -> crate::Result<Vec<WsMessage>> {
-    // Parse JSON once into Value
-    let value: Value = serde_json::from_slice(bytes)
+    /// Borrowed `event_type` probe. `Cow` tolerates escaped strings.
+    #[derive(Deserialize)]
+    struct EventTag<'a> {
+        #[serde(borrow, default)]
+        event_type: Option<std::borrow::Cow<'a, str>>,
+    }
+
+    // Syntax validation + zero-copy capture of the raw text. Invalid JSON
+    // errors here, exactly where the old `from_slice::<Value>` errored.
+    let raw: &serde_json::value::RawValue = serde_json::from_slice(bytes)
         .map_err(|err| crate::error::Error::with_source(Kind::Internal, Box::new(err)))?;
+    let text = raw.get().trim_start();
 
-    match &value {
-        Value::Object(map) => {
-            // Single message: check event_type before full deserialization
-            let event_type = map.get("event_type").and_then(Value::as_str);
-
-            match event_type {
-                None => Ok(vec![]),
-                Some(event_type) if !interest.is_interested_in_event(event_type) => Ok(vec![]),
-                Some(_) => {
-                    // Interested: deserialize from cached Value (no re-parsing)
-                    let msg: WsMessage = serde_json::from_value(value)?;
-                    Ok(vec![msg])
-                }
-            }
+    if text.starts_with('{') {
+        // Single message: probe the tag before full deserialization. A probe
+        // failure on syntactically valid JSON means an exotic shape (e.g.
+        // non-string event_type) — the old code returned empty for those.
+        let Ok(EventTag {
+            event_type: Some(event_type),
+        }) = serde_json::from_str::<EventTag>(text)
+        else {
+            return Ok(vec![]);
+        };
+        if !interest.is_interested_in_event(&event_type) {
+            return Ok(vec![]);
         }
-        Value::Array(arr) => Ok(arr
+        let msg: WsMessage = serde_json::from_str(text)?;
+        Ok(vec![msg])
+    } else if text.starts_with('[') {
+        let elems: Vec<&serde_json::value::RawValue> = serde_json::from_str(text)
+            .map_err(|err| crate::error::Error::with_source(Kind::Internal, Box::new(err)))?;
+        Ok(elems
             .iter()
             .filter_map(|elem| {
-                let obj = elem.as_object()?;
-                let event_type = obj.get("event_type").and_then(Value::as_str)?;
-
-                if !interest.is_interested_in_event(event_type) {
+                let tag = serde_json::from_str::<EventTag>(elem.get()).ok()?;
+                let event_type = tag.event_type?;
+                if !interest.is_interested_in_event(&event_type) {
                     return None;
                 }
-
-                serde_json::from_value(elem.clone())
+                serde_json::from_str::<WsMessage>(elem.get())
                     .inspect_err(|err| {
                         #[cfg(feature = "tracing")]
                         warn!(
@@ -533,11 +550,14 @@ pub fn parse_if_interested(
                             error = %err,
                             "Skipping unknown/invalid WS event in batch"
                         );
+                        #[cfg(not(feature = "tracing"))]
+                        let _: &_ = &err;
                     })
                     .ok()
             })
-            .collect()),
-        _ => Ok(vec![]),
+            .collect())
+    } else {
+        Ok(vec![])
     }
 }
 

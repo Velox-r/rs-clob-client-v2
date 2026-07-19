@@ -302,7 +302,7 @@ mod market_channel {
         assert_eq!(book.bids[0].price, dec!(0.48));
         assert_eq!(book.bids[0].size, dec!(30));
         assert_eq!(book.asks[0].price, dec!(0.52));
-        assert_eq!(book.hash, Some("0x1234567890abcdef".to_owned()));
+        assert_eq!(book.hash, None, "hash skipped at deserialization (velox-latency)");
     }
 
     #[tokio::test]
@@ -1672,7 +1672,7 @@ mod message_parsing {
 
         // Verify all fields from docs example
         assert_eq!(book.timestamp, 123_456_789_000);
-        assert_eq!(book.hash, Some("0x1234567890abcdef".to_owned()));
+        assert_eq!(book.hash, None, "hash skipped at deserialization (velox-latency)");
         assert_eq!(book.bids[1].price, dec!(0.49));
         assert_eq!(book.bids[1].size, dec!(20));
         assert_eq!(book.asks[2].price, dec!(0.54));
@@ -1729,10 +1729,7 @@ mod message_parsing {
         assert_eq!(prices.price_changes[0].asset_id, asset_a);
         assert_eq!(prices.price_changes[0].price, dec!(0.5));
         assert_eq!(prices.price_changes[0].size, Some(dec!(200)));
-        assert_eq!(
-            prices.price_changes[0].hash,
-            Some("56621a121a47ed9333273e21c83b660cff37ae50".to_owned())
-        );
+        assert_eq!(prices.price_changes[0].hash, None, "hash skipped (velox-latency)");
 
         assert_eq!(prices.price_changes[1].asset_id, asset_b);
         assert_eq!(prices.price_changes[1].price, dec!(0.75));
